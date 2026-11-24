@@ -28,7 +28,7 @@ const maxKeyLen = 128
 var ErrInProgress = apperr.New(apperr.Conflict, "idempotency.in_progress", "a request with this Idempotency-Key is still being processed")
 
 // ErrMismatch means the key was used with a different request.
-var ErrMismatch = apperr.New(apperr.IdempotencyMismatch, "idempotency.key_reused", "Idempotency-Key was already used with a different request")
+var ErrMismatch = apperr.New(apperr.IdempotencyMismatch, "idempotency.mismatch", "Idempotency-Key was already used with a different request")
 
 // ErrKeyInvalid means the header value is unusable.
 var ErrKeyInvalid = apperr.New(apperr.Validation, "idempotency.key_invalid", "Idempotency-Key must be 1-128 visible ASCII characters")
