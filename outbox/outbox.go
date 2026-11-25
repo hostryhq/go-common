@@ -6,6 +6,7 @@ package outbox
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -30,6 +31,16 @@ CREATE TABLE IF NOT EXISTS outbox (
 );
 CREATE INDEX IF NOT EXISTS outbox_unpublished ON outbox (seq) WHERE published_at IS NULL;
 CREATE INDEX IF NOT EXISTS outbox_published_at ON outbox (published_at) WHERE published_at IS NOT NULL;
+`
+
+// RelayStateSchema is the forward-only migration of outbox_relay_state: the bus generation the
+// relay last republished for (ADR-0011 B9 item 2, Note N1). It is rolled back with the database.
+const RelayStateSchema = `
+CREATE TABLE IF NOT EXISTS outbox_relay_state (
+  stream     text        PRIMARY KEY,
+  generation text        NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
 `
 
 // Publish writes e to the outbox inside tx (E1: a rolled-back transaction publishes nothing).
@@ -72,7 +83,18 @@ type Relay struct {
 	Log       *slog.Logger
 	Now       func() time.Time
 
-	wake chan struct{}
+	// Generation reads the bus generation of Stream (bus.GenerationFunc). When set, the relay
+	// compares it with outbox_relay_state at every connect and every GenerationEvery (default one
+	// minute). On a difference it marks the outbox rows inside the Retention horizon unpublished,
+	// republishes them in order, then records the generation. This covers hostry-bus-reset with
+	// services still running, and a restore of the service database.
+	Generation      func(ctx context.Context) (string, error)
+	Stream          string
+	GenerationEvery time.Duration
+
+	wake       chan struct{}
+	pendingGen string // generation being republished; recorded once the outbox is drained
+	lastGen    time.Time
 }
 
 func (r *Relay) init() {
@@ -96,6 +118,12 @@ func (r *Relay) init() {
 	}
 	if r.wake == nil {
 		r.wake = make(chan struct{}, 1)
+	}
+	if r.GenerationEvery == 0 {
+		r.GenerationEvery = time.Minute
+	}
+	if r.Stream == "" {
+		r.Stream = "default"
 	}
 }
 
@@ -135,6 +163,12 @@ func (r *Relay) Run(ctx context.Context) error {
 		}
 		wait := r.Poll
 		if locked {
+			if now := r.Now(); r.Generation != nil && (r.lastGen.IsZero() || now.Sub(r.lastGen) >= r.GenerationEvery) {
+				r.lastGen = now
+				if err := r.checkGeneration(ctx); err != nil && ctx.Err() == nil {
+					r.Log.Warn("outbox relay: bus generation check failed", "stream", r.Stream, "err", err)
+				}
+			}
 			n, err := r.relayBatch(ctx)
 			switch {
 			case err != nil && ctx.Err() != nil:
@@ -147,6 +181,13 @@ func (r *Relay) Run(ctx context.Context) error {
 				backoff = 0
 				if n == r.Batch {
 					wait = 0 // more rows waiting
+				} else if r.pendingGen != "" {
+					// Everything inside the horizon is republished: now record the generation.
+					if err := r.recordGeneration(ctx, r.pendingGen); err != nil {
+						r.Log.Warn("outbox relay: record generation", "stream", r.Stream, "err", err)
+					} else {
+						r.pendingGen = ""
+					}
 				}
 			}
 			if now := r.Now(); now.Sub(lastClean) > time.Minute {
@@ -216,6 +257,45 @@ func (r *Relay) relayBatch(ctx context.Context) (int, error) {
 		}
 	}
 	return len(batch), nil
+}
+
+// checkGeneration compares the stream's generation with the recorded one. A stream seen for the
+// first time on this database records its generation and replays nothing.
+func (r *Relay) checkGeneration(ctx context.Context) error {
+	gen, err := r.Generation(ctx)
+	if err != nil {
+		return err
+	}
+	if gen == "" || gen == r.pendingGen {
+		return nil
+	}
+	var recorded string
+	err = r.DB.QueryRowContext(ctx, `SELECT generation FROM outbox_relay_state WHERE stream = $1`, r.Stream).Scan(&recorded)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return r.recordGeneration(ctx, gen)
+	case err != nil:
+		return err
+	case recorded == gen:
+		r.pendingGen = ""
+		return nil
+	}
+	horizon := r.Now().Add(-r.Retention)
+	res, err := r.DB.ExecContext(ctx, `UPDATE outbox SET published_at = NULL WHERE published_at IS NOT NULL AND created_at >= $1`, horizon)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	r.pendingGen = gen
+	r.Log.Warn("outbox relay: bus generation changed; republishing the outbox", "stream", r.Stream, "from", recorded, "to", gen, "rows", n)
+	r.Wake()
+	return nil
+}
+
+func (r *Relay) recordGeneration(ctx context.Context, gen string) error {
+	_, err := r.DB.ExecContext(ctx, `INSERT INTO outbox_relay_state (stream, generation, updated_at) VALUES ($1, $2, now())
+		ON CONFLICT (stream) DO UPDATE SET generation = excluded.generation, updated_at = excluded.updated_at`, r.Stream, gen)
+	return err
 }
 
 // Pending returns the number of unpublished rows and the age of the oldest (alert: older than 60 s).

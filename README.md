@@ -16,7 +16,11 @@ Shared Go libraries for Hostry services (module `github.com/hostryhq/go-common`,
 | `health` | `/healthz` and `/readyz` |
 | `httpx` | Request-id and panic-recovery middleware |
 | `testkit` | Fake clock, deterministic ids, two test tenants, HTTP helpers |
+| `restore` | Restore epoch (ADR-0002 A2.4): `Reader` (read once at start, read-only), per-service `restore_state` (`StateSchema`), `Guard` with `OnRestore` hooks, `Check` for `/readyz`; `restore/restoretest.Stamp` for dev and CI |
+| `outbox` | Transactional outbox and relay; the relay checks the bus generation at connect and every minute (`Relay.Generation`, `RelayStateSchema`, ADR-0011 Note N1) |
 
-Run tests: `go vet ./... && go test -race ./...`
+Run tests: `go vet ./... && go test -race ./...`; the bus, outbox and restore integration tests: `go test -tags integration ./internal/bustest` (needs Docker; starts its own compose project on free ports and removes it).
 
-Not here yet (see ADRs): `sync` (HLC, op store, ADR-0002), restore-epoch reader, outbox/inbox and NATS publisher/subscriber, RLS migration helper, shared isolation suites T1-T5, metrics endpoint.
+Startup order in a service: read the epoch (`restore.Guard.Run`), register hooks first with `OnRestore`, add `guard.Check` to `/readyz`, start the relay only after `guard.Done()`.
+
+Not here yet (see ADRs): `sync` (HLC, op store, ADR-0002), RLS migration helper, shared isolation suites T1-T5, metrics endpoint.

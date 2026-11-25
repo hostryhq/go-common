@@ -57,8 +57,40 @@ type ProvisionOptions struct {
 	AckWait    time.Duration
 	BackOff    []time.Duration
 	MaxDeliver int
-	// Generation is recorded in stream metadata (bus generation id, B9).
+	// Generation is recorded in stream metadata (bus generation id, B9). hostry-restore and
+	// hostry-bus-reset give every provisioning a fresh one.
 	Generation string
+	// Epoch is the restore epoch id recorded as hostry_epoch; the preflight reads it (B9 item 4).
+	Epoch string
+}
+
+// Stream metadata keys (ADR-0011 Note N1).
+const (
+	MetaGeneration = "hostry_generation"
+	MetaEpoch      = "hostry_epoch"
+)
+
+// StreamMetadata reads the Hostry metadata of a publisher's stream. A service may read its own
+// stream only (permission $JS.API.STREAM.INFO.<stream>).
+func StreamMetadata(ctx context.Context, nc *nats.Conn, publisher string) (generation, epoch string, err error) {
+	js, err := jetstream.New(nc)
+	if err != nil {
+		return "", "", err
+	}
+	s, err := js.Stream(ctx, StreamName(publisher))
+	if err != nil {
+		return "", "", err
+	}
+	md := s.CachedInfo().Config.Metadata
+	return md[MetaGeneration], md[MetaEpoch], nil
+}
+
+// GenerationFunc returns the function an outbox.Relay uses to read its stream's bus generation.
+func GenerationFunc(nc *nats.Conn, publisher string) func(ctx context.Context) (string, error) {
+	return func(ctx context.Context) (string, error) {
+		g, _, err := StreamMetadata(ctx, nc, publisher)
+		return g, err
+	}
 }
 
 // DefaultBackOff is the provisional redelivery schedule of ADR-0011 B5 (10 attempts).
@@ -102,7 +134,7 @@ func Provision(ctx context.Context, nc *nats.Conn, reg *Registry, o ProvisionOpt
 			MaxBytes:   o.MaxBytes,
 			Discard:    jetstream.DiscardNew,
 			Duplicates: 2 * time.Minute,
-			Metadata:   map[string]string{"hostry_generation": o.Generation},
+			Metadata:   map[string]string{MetaGeneration: o.Generation, MetaEpoch: o.Epoch},
 		})
 		if err != nil {
 			return fmt.Errorf("bus: stream %s: %w", StreamName(svc), err)

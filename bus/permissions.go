@@ -27,7 +27,8 @@ func (r *Registry) PermissionsFor(service string) Permissions {
 	p := Permissions{Subscribe: []string{InboxPrefix(service) + ".>"}}
 	for _, t := range r.Types {
 		if t.Publisher == service {
-			p.Publish = append(p.Publish, "evt."+service+".>")
+			// STREAM.INFO of its own stream: the relay reads hostry_generation (ADR-0011 Note N1).
+			p.Publish = append(p.Publish, "evt."+service+".>", "$JS.API.STREAM.INFO."+StreamName(service))
 			break
 		}
 	}

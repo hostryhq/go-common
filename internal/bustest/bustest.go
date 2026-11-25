@@ -21,6 +21,7 @@ import (
 	"github.com/hostryhq/go-common/bus"
 	"github.com/hostryhq/go-common/inbox"
 	"github.com/hostryhq/go-common/outbox"
+	"github.com/hostryhq/go-common/restore"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -38,6 +39,7 @@ type Env struct {
 	project   string
 	compose   string
 	dbSeq     int
+	dsns      sync.Map
 	mu        sync.Mutex
 }
 
@@ -232,10 +234,18 @@ func (e *Env) NewDB(t testing.TB) *sql.DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	for _, s := range []string{outbox.Schema, inbox.Schema} {
+	for _, s := range []string{outbox.Schema, outbox.RelayStateSchema, inbox.Schema, restore.StateSchema} {
 		if _, err := db.Exec(s); err != nil {
 			t.Fatal(err)
 		}
 	}
+	e.dsns.Store(db, e.pgDSNBase+name)
 	return db
+}
+
+// DSN returns the connection string of a database made by NewDB (dev credentials only).
+func (e *Env) DSN(db *sql.DB) string {
+	v, _ := e.dsns.Load(db)
+	s, _ := v.(string)
+	return s
 }
