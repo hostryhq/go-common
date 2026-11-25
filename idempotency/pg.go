@@ -97,6 +97,28 @@ func DoTx(ctx context.Context, db *sql.DB, o PGOptions, tenant ids.ID, key, fing
 		return Response{}, false, err
 	}
 	defer func() { _ = tx.Rollback() }() // no-op after commit
+	resp, replayed, err = DoTxIn(ctx, tx, o, tenant, key, fingerprint, fn)
+	if err != nil {
+		return resp, replayed, err
+	}
+	if err = tx.Commit(); err != nil {
+		return Response{}, false, err
+	}
+	return resp, replayed, nil
+}
+
+// DoTxIn is DoTx inside a transaction the caller owns, for callers whose tx comes from elsewhere
+// (for example go-auth WithAuditedTx, which also writes the audit record). The semantics are those
+// of DoTx: fn runs at most once per (tenant, key); the claim, the business write and the stored
+// result are in the caller's tx, so they commit or roll back with it; a concurrent request with
+// the same key waits on the claim row; an expired record is replaced; a replay returns the stored
+// result (and ErrBodyOmitted for an OmitBody result) without running fn.
+//
+// DoTxIn never commits or rolls back tx. The claim and fn run inside a SAVEPOINT: when fn returns
+// an error, the claim and everything fn wrote are rolled back to the savepoint (which also clears a
+// failed-statement state), so the key is free again and the caller may still commit the tx, for
+// example to keep an audit row of the failure. fn must not commit or roll back tx either.
+func DoTxIn(ctx context.Context, tx *sql.Tx, o PGOptions, tenant ids.ID, key, fingerprint string, fn func(tx *sql.Tx) (TxResult, error)) (resp Response, replayed bool, err error) {
 	now := o.now()
 	t := tenant.String()
 	if _, err = tx.ExecContext(ctx, `DELETE FROM idempotency_records WHERE tenant_id=$1 AND key=$2 AND expires_at <= $3`, t, key, now); err != nil {
@@ -111,8 +133,20 @@ func DoTx(ctx context.Context, db *sql.DB, o PGOptions, tenant ids.ID, key, fing
 	if n, _ := res.RowsAffected(); n == 0 {
 		return replay(ctx, tx, t, key, fingerprint)
 	}
+	// The claim row above is ours. Protect it and fn's writes with a savepoint so an fn error
+	// leaves the key free even if the caller commits the tx afterwards.
+	if _, err = tx.ExecContext(ctx, `SAVEPOINT idempotency_dotxin`); err != nil {
+		return Response{}, false, err
+	}
 	r, err := fn(tx)
 	if err != nil {
+		if _, rerr := tx.ExecContext(ctx, `ROLLBACK TO SAVEPOINT idempotency_dotxin`); rerr != nil {
+			return Response{}, false, errors.Join(err, rerr)
+		}
+		// The claim was inserted before the savepoint: remove it explicitly.
+		if _, derr := tx.ExecContext(ctx, `DELETE FROM idempotency_records WHERE tenant_id=$1 AND key=$2 AND NOT done`, t, key); derr != nil {
+			return Response{}, false, errors.Join(err, derr)
+		}
 		return Response{}, false, err
 	}
 	body := r.Response.Body
@@ -125,7 +159,7 @@ func DoTx(ctx context.Context, db *sql.DB, o PGOptions, tenant ids.ID, key, fing
 		t, key, r.Response.Status, r.Response.ContentType, body, hex.EncodeToString(sum[:])); err != nil {
 		return Response{}, false, err
 	}
-	if err = tx.Commit(); err != nil {
+	if _, err = tx.ExecContext(ctx, `RELEASE SAVEPOINT idempotency_dotxin`); err != nil {
 		return Response{}, false, err
 	}
 	return r.Response, false, nil
