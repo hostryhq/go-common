@@ -1,0 +1,3 @@
+api-specs branch feat/phase2-specs @ 1462fb8
+entities/restaurant/*.yaml and sync/conformance/v1.json are copied verbatim.
+TestSpecCopyIsCurrent compares them with a checkout when HOSTRY_API_SPECS is set.

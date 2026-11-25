@@ -53,6 +53,19 @@ type Source interface {
 // ErrNoMessage is returned by Source.Next when nothing arrived in time.
 var ErrNoMessage = errors.New("inbox: no message")
 
+// ErrPermanent marks a handler error that retrying cannot fix (a malformed or unknown event). The
+// subscriber parks such an event on its first delivery instead of blocking the ordered consumer
+// through the whole back-off. Wrap with Permanent or match with errors.Is.
+var ErrPermanent = errors.New("inbox: permanent handler error")
+
+// Permanent wraps err so that the subscriber parks the event at once.
+func Permanent(err error) error { return fmt.Errorf("%w: %w", ErrPermanent, err) }
+
+// shouldPark reports whether a failed delivery is parked now: permanent, or the last attempt.
+func shouldPark(err error, attempt, maxAttempts uint64) bool {
+	return errors.Is(err, ErrPermanent) || attempt >= maxAttempts
+}
+
 // Handler applies an event inside tx. The tenant context is already set on ctx from the
 // envelope (B7). Returning an error rolls back and triggers redelivery. The handler must also
 // tolerate out-of-order delivery (use key_seq; see Newer).
@@ -149,7 +162,7 @@ func (s *Subscriber) Process(ctx context.Context, d Delivery) error {
 	case err == nil:
 		_ = dup // a duplicate is acknowledged without effect
 		return d.Ack()
-	case d.NumDelivered() >= s.MaxAttempts:
+	case shouldPark(err, d.NumDelivered(), s.MaxAttempts):
 		return s.park(ctx, d, env.ID.String(), err.Error())
 	default:
 		s.Log.Warn("inbox: handler failed; will redeliver", "consumer", s.Consumer, "event_id", env.ID, "attempt", d.NumDelivered())
