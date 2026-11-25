@@ -284,6 +284,14 @@ type Store interface {
 	AddVoid(ctx context.Context, tenant string, r OpRef) error
 	// Voided returns the subset of refs that are voided.
 	Voided(ctx context.Context, tenant string, refs []OpRef) (map[OpRef]bool, error)
+	// PutPII stores personal data in the owner's erasable side table (never a projection row). It is
+	// idempotent per (row, op) and a no-op for an op whose pii was erased, whatever the arrival order.
+	PutPII(ctx context.Context, w PIIWrite) error
+	// AddErasure records that the pii of an op is erased and removes its values and salts from the
+	// side table, keeping the commitments. Adding it twice is a no-op. It returns the records emptied.
+	AddErasure(ctx context.Context, tenant string, r OpRef) (int64, error)
+	// Erased reports whether the pii of the op was erased.
+	Erased(ctx context.Context, tenant string, r OpRef) (bool, error)
 }
 
 // Engine applies parsed ops for one service: Service names the owner whose entities it owns and
@@ -307,6 +315,10 @@ type PIIWrite struct {
 	Key    RowKey
 	Ref    OpRef
 	Fields map[string]any
+	// Salts (base64url) and Commits (hex SHA-256(salt||JCS(value))) are per field, as in Fields.
+	// Erasure removes Fields and Salts and keeps Commits.
+	Salts   map[string]string
+	Commits map[string]string
 }
 
 // Result is what Apply did.
@@ -316,6 +328,8 @@ type Result struct {
 	Skipped []Skip
 	Ignored int // mutations of entities this service neither owns nor replicates
 	Voided  []OpRef
+	// PIIErased lists the ops whose stored pii this call erased (or had already erased).
+	PIIErased []OpRef
 }
 
 // ErrNoTenant is returned for an op without a tenant.
@@ -346,6 +360,13 @@ func (e *Engine) Apply(ctx context.Context, op *Op) (Result, error) {
 		res.Voided = append(res.Voided, v)
 	}
 
+	for _, r := range op.PIIErase {
+		if _, err := e.Store.AddErasure(ctx, tenant, r); err != nil {
+			return Result{}, err
+		}
+		res.PIIErased = append(res.PIIErased, r)
+	}
+
 	for i, m := range op.Muts {
 		role := e.Reg.RoleOf(e.Service, m.E)
 		if role == RoleNone {
@@ -365,20 +386,33 @@ func (e *Engine) Apply(ctx context.Context, op *Op) (Result, error) {
 		touched[k] = struct{}{}
 	}
 
+	erased, err := e.Store.Erased(ctx, tenant, op.Ref)
+	if err != nil {
+		return Result{}, err
+	}
 	for entName, rows := range op.PII {
+		if erased { // erasure may arrive before the op it erases
+			break
+		}
 		if e.Reg.RoleOf(e.Service, entName) != RoleOwner { // a replica never stores pii
 			continue
 		}
 		ent := e.Reg.Entities[entName]
 		for id, fields := range rows {
-			kept := map[string]any{}
+			kept, salts, commits := map[string]any{}, map[string]string{}, map[string]string{}
 			for n, v := range fields {
 				if f := ent.Fields[n]; f != nil && f.PII {
 					kept[n] = v
+					salts[n] = op.PIISalts[entName][id][n]
+					commits[n] = op.PIICommits[entName][id][n]
 				}
 			}
 			if len(kept) > 0 {
-				res.PII = append(res.PII, PIIWrite{Key: RowKey{Tenant: tenant, Entity: entName, ID: id}, Ref: op.Ref, Fields: kept})
+				w := PIIWrite{Key: RowKey{Tenant: tenant, Entity: entName, ID: id}, Ref: op.Ref, Fields: kept, Salts: salts, Commits: commits}
+				if err := e.Store.PutPII(ctx, w); err != nil {
+					return Result{}, err
+				}
+				res.PII = append(res.PII, w)
 			}
 		}
 	}

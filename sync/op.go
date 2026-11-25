@@ -71,9 +71,38 @@ type Op struct {
 	Muts      []Mut
 	// Voids lists the ops named by sync_void records (intent sync.void, cloud origin only).
 	Voids []OpRef
-	// PII is the personal data beside the op, as entity -> row id -> field -> value. See Engine.
+	// PII is the verified personal data beside the op, as entity -> row id -> field -> value. Only
+	// fields whose salted commitment (body.pii_c) checked out are here; see PIIDropped. See Engine.
 	PII map[string]map[string]map[string]any
+	// PIISalts holds the salt (base64url) of each verified PII field, same shape as PII. The owner
+	// keeps it with the value so the commitment can be re-checked; erasure removes both.
+	PIISalts map[string]map[string]map[string]string
+	// PIICommits holds body.pii_c for the verified fields. It survives erasure.
+	PIICommits PIIC
+	// PIIDropped counts pii fields discarded for a missing or wrong commitment or salt.
+	PIIDropped int
+	// PIIErase lists the ops whose pii is erased by this op (intent sync.pii.erase, record
+	// pii_erase, cloud origin only).
+	PIIErase []OpRef
+	// SeriesClose lists the series_close control records (intent series.close): a device's
+	// statement of the last number of a closed series.
+	SeriesClose []SeriesClose
 }
+
+// SeriesClose is one series_close record (provisional; id = series id, fields code, fy, last_number).
+type SeriesClose struct {
+	SeriesID   string
+	Code       string
+	FY         string
+	LastNumber int64
+}
+
+// Protocol records and intents that are not synced entities.
+const (
+	PIIEraseIntent  = "sync.pii.erase"
+	recordPIIErase  = "pii_erase"
+	recordSeriesEnd = "series_close"
+)
 
 // Upcaster rewrites a parsed op of an older intent_v to the shape the service understands
 // (ADR-0002 S13). It runs after verification, on the parsed copy; the stored bytes are never touched.
@@ -189,6 +218,7 @@ func (p *Parser) ParseEnvelope(env events.Envelope) (*Op, error) {
 		At      string          `json:"at"`
 		Doc     *Doc            `json:"doc"`
 		Muts    json.RawMessage `json:"muts"`
+		PIIC    PIIC            `json:"pii_c"`
 	}
 	if err := json.Unmarshal([]byte(body), &b); err != nil {
 		return nil, malformed("body: %v", err)
@@ -230,6 +260,22 @@ func (p *Parser) ParseEnvelope(env events.Envelope) (*Op, error) {
 		return nil, err
 	}
 	for _, m := range muts {
+		switch m.E {
+		case recordPIIErase:
+			ref, err := parsePIIErase(m, op)
+			if err != nil {
+				return nil, err
+			}
+			op.PIIErase = append(op.PIIErase, ref)
+			continue
+		case recordSeriesEnd:
+			sc, err := parseSeriesClose(m)
+			if err != nil {
+				return nil, err
+			}
+			op.SeriesClose = append(op.SeriesClose, sc)
+			continue
+		}
 		if m.E == "sync_void" { // a protocol record, not an entity
 			ref, err := parseVoid(m, op)
 			if err != nil {
@@ -241,9 +287,11 @@ func (p *Parser) ParseEnvelope(env events.Envelope) (*Op, error) {
 		op.Muts = append(op.Muts, m)
 	}
 	if len(pii) > 0 && string(pii) != "{}" && string(pii) != "null" {
-		if op.PII, err = parsePII(pii); err != nil {
+		v, err := verifyPII(pii, b.PIIC)
+		if err != nil {
 			return nil, err
 		}
+		op.PII, op.PIISalts, op.PIICommits, op.PIIDropped = v.values, v.salts, v.commits, v.dropped
 	}
 	return p.upcast(op)
 }
@@ -351,26 +399,37 @@ func parseVoid(m Mut, op *Op) (OpRef, error) {
 	return ref, nil
 }
 
-func parsePII(raw []byte) (map[string]map[string]map[string]any, error) {
-	var generic map[string]map[string]map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &generic); err != nil {
-		return nil, malformed("pii must be entity -> row id -> field -> value: %v", err)
+func parsePIIErase(m Mut, op *Op) (OpRef, error) {
+	if !strings.HasPrefix(op.Ref.Origin, "cloud-") || op.Intent != PIIEraseIntent || m.K != KindInsert {
+		return OpRef{}, malformed("a pii_erase record must be an insert of intent sync.pii.erase from a cloud origin")
 	}
-	out := make(map[string]map[string]map[string]any, len(generic))
-	for e, rows := range generic {
-		out[e] = make(map[string]map[string]any, len(rows))
-		for id, fields := range rows {
-			out[e][id] = make(map[string]any, len(fields))
-			for name, rv := range fields {
-				v, err := decodeValue(rv)
-				if err != nil {
-					return nil, malformed("pii %s field %q: %v", e, name, err)
-				}
-				out[e][id][name] = v
-			}
-		}
+	ref, err := parseOpRefID(m.ID)
+	if err != nil {
+		return OpRef{}, malformed("pii_erase id: %v", err)
 	}
-	return out, nil
+	return ref, nil
+}
+
+func parseSeriesClose(m Mut) (SeriesClose, error) {
+	code, _ := m.F["code"].(string)
+	fy, _ := m.F["fy"].(string)
+	last, ok := m.F["last_number"].(int64)
+	if m.K != KindInsert || code == "" || fy == "" || !ok || last < 0 {
+		return SeriesClose{}, malformed("series_close needs code, fy and last_number >= 0")
+	}
+	return SeriesClose{SeriesID: m.ID, Code: code, FY: fy, LastNumber: last}, nil
+}
+
+func parseOpRefID(id string) (OpRef, error) {
+	parts := strings.Split(id, "|")
+	if len(parts) != 3 {
+		return OpRef{}, fmt.Errorf("%q is not stream|origin|seq", id)
+	}
+	seq, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil || seq < 1 {
+		return OpRef{}, fmt.Errorf("seq")
+	}
+	return OpRef{Stream: parts[0], Origin: parts[1], Seq: seq}, nil
 }
 
 func malformed(format string, a ...any) error {

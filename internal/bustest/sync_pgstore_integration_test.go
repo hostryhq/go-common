@@ -107,6 +107,43 @@ func TestSyncPGStoreMatchesProjectionRules(t *testing.T) {
 	}
 }
 
+// A pii erasure op removes values and salts from sync_pii and keeps the commitments, whichever
+// of the erasure and the op arrives first; the value is nowhere in the database afterwards.
+func TestSyncPGStoreErasureKeepsCommitmentsOnly(t *testing.T) {
+	db, ctx := syncDB(t), context.Background()
+	reg, err := gsync.LoadRegistry(os.DirFS("../../sync/testdata"), "entities")
+	if err != nil {
+		t.Fatal(err)
+	}
+	orders := &gsync.Engine{Reg: reg, Service: "orders", Store: gsync.PGStore{DB: db}}
+	mkPII := func(seq int64, row string) *gsync.Op {
+		o := sop(sTenantA, "dev-a", seq, 100*seq, gsync.Mut{E: "check", ID: row, K: gsync.KindInsert, F: map[string]any{}})
+		o.PII = map[string]map[string]map[string]any{"check": {row: {"customer_name": "Unique Erasure Guest"}}}
+		o.PIISalts = map[string]map[string]map[string]string{"check": {row: {"customer_name": "c2FsdHNhbHRzYWx0c2FsdA"}}}
+		o.PIICommits = gsync.PIIC{"check": {row: {"customer_name": "00ff"}}}
+		return o
+	}
+	erase := func(target gsync.OpRef) *gsync.Op {
+		return &gsync.Op{Ref: gsync.OpRef{Origin: "cloud-1", Stream: sOutlet, Seq: 50 + target.Seq}, HLC: gsync.HLC{Ms: 900}.String(), TenantID: gids.ID(sTenantA), PIIErase: []gsync.OpRef{target}}
+	}
+	first, second := mkPII(1, "c1"), mkPII(2, "c2")
+	for _, o := range []*gsync.Op{first, erase(first.Ref), erase(second.Ref), second, first} { // second: erase before op; first redelivered
+		if _, err := orders.Apply(ctx, o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var rows, withValue, withSalt, withCommit, leaked int
+	_ = db.QueryRow(`SELECT count(*) FROM sync_pii`).Scan(&rows)
+	_ = db.QueryRow(`SELECT count(*) FROM sync_pii WHERE fields::text LIKE '%Erasure Guest%'`).Scan(&withValue)
+	_ = db.QueryRow(`SELECT count(*) FROM sync_pii WHERE salts::text LIKE '%c2FsdHNhbHRz%'`).Scan(&withSalt)
+	_ = db.QueryRow(`SELECT count(*) FROM sync_pii WHERE commits::text LIKE '%00ff%'`).Scan(&withCommit)
+	_ = db.QueryRow(`SELECT count(*) FROM sync_candidates WHERE fields::text LIKE '%Erasure Guest%'`).Scan(&leaked)
+	// first was stored, then erased (commitment kept); second arrived after its erasure and was never stored.
+	if rows != 1 || withValue != 0 || withSalt != 0 || withCommit != 1 || leaked != 0 {
+		t.Fatalf("rows=%d value=%d salt=%d commit=%d candidates=%d", rows, withValue, withSalt, withCommit, leaked)
+	}
+}
+
 func sameRow(a, b gsync.Row) bool {
 	if a.Exists != b.Exists || a.Deleted != b.Deleted || len(a.Fields) != len(b.Fields) || len(a.Conflicts) != len(b.Conflicts) {
 		return false

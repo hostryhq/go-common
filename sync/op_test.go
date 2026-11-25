@@ -208,7 +208,8 @@ func TestUpcasterRunsAfterVerificationOnTheParsedCopy(t *testing.T) {
 
 func TestParsePIIShape(t *testing.T) {
 	op, err := ParseOp(eventSpec{pii: `{"check":{"c1":{"customer_name":"A. Guest"}}}`}.build(t))
-	if err != nil || op.PII["check"]["c1"]["customer_name"] != "A. Guest" {
+	// Since the commitment rule (ADR-0014 A2.1) a value without pii_c is dropped; see pii_test.go for the kept case.
+	if err != nil || len(op.PII) != 0 || op.PIIDropped != 1 {
 		t.Fatalf("pii: %+v err=%v", op, err)
 	}
 	if _, err := ParseOp(eventSpec{pii: `{"customer_name":"flat"}`}.build(t)); !errors.Is(err, ErrMalformed) {
