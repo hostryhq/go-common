@@ -51,7 +51,8 @@ func provisionStreams(url, seedFile string, reg *bus.Registry) error {
 	defer nc.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	return bus.Provision(ctx, nc, reg, bus.ProvisionOptions{Generation: "dev-1", Epoch: "genesis"})
+	// 256 MiB per stream: every publisher's stream must fit the dev server's 4 GB JetStream store.
+	return bus.Provision(ctx, nc, reg, bus.ProvisionOptions{Generation: "dev-1", Epoch: "genesis", MaxBytes: 256 << 20})
 }
 
 func fail(err error) { fmt.Fprintln(os.Stderr, "busdev:", err); os.Exit(1) }
