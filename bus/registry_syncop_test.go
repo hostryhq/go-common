@@ -66,3 +66,11 @@ func TestRegistryLoadsFullPhase2EventsDir(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestRegistryRejectsGatewayEventNameAsNamespace(t *testing.T) {
+	op := &fstest.MapFile{Data: []byte("$id: urn:hostry:events:sync.op:v1\nx-publisher: sync\nx-subscribers: [orders]\n" +
+		"x-subscribers-by-namespace:\n  flagged: [orders]\n")}
+	if _, err := LoadRegistry(fstest.MapFS{"sync/op.v1.yaml": op}); err == nil {
+		t.Fatal("flagged is the gateway event sync.op.flagged and must not be an op namespace")
+	}
+}

@@ -127,6 +127,32 @@ func (p *Parser) Register(intent string, fromV int, fn Upcaster) {
 	p.upcasters[upKey{intent, fromV}] = fn
 }
 
+// Gateway event types published by the sync service beside the ops. Their subjects look like
+// op namespaces (evt.sync.op.flagged.v1) but they are not ops: "flagged" is not a namespace.
+const (
+	OpFlaggedType          = "sync.op.flagged"
+	QuarantineRecordedType = "sync.quarantine.recorded"
+	PIIErasedType          = "sync.pii.erased"
+)
+
+func isGatewayEvent(typ string) bool {
+	return typ == OpFlaggedType || typ == QuarantineRecordedType || typ == PIIErasedType
+}
+
+// IsGatewayEvent reports whether typ is one of the sync gateway events (not an op).
+func IsGatewayEvent(typ string) bool { return isGatewayEvent(typ) }
+
+// OpNamespace returns the entity namespace of an op event type sync.op.<namespace>. It is false
+// for gateway events (sync.op.flagged, ...), for other types and for malformed ones. Consumers
+// route on it instead of a "sync.op." prefix test.
+func OpNamespace(typ string) (string, bool) {
+	ns, ok := strings.CutPrefix(typ, "sync.op.")
+	if !ok || ns == "" || strings.Contains(ns, ".") || isGatewayEvent(typ) {
+		return "", false
+	}
+	return ns, true
+}
+
 // ParseOp is the one parser for sync op events. raw is the bus message (the events.Envelope JSON).
 func ParseOp(raw []byte) (*Op, error) { return (&Parser{}).Parse(raw) }
 
@@ -148,8 +174,11 @@ func (p *Parser) Parse(raw []byte) (*Op, error) {
 
 // ParseEnvelope is Parse for an already decoded envelope.
 func (p *Parser) ParseEnvelope(env events.Envelope) (*Op, error) {
-	ns, ok := strings.CutPrefix(env.Type, "sync.op.")
-	if !ok || ns == "" || strings.Contains(ns, ".") {
+	ns, ok := OpNamespace(env.Type)
+	if !ok {
+		if isGatewayEvent(env.Type) || !strings.HasPrefix(env.Type, "sync.") {
+			return nil, fmt.Errorf("%w: %s", ErrNotOp, env.Type)
+		}
 		return nil, malformed("type %q is not sync.op.<namespace>", env.Type)
 	}
 	if env.V != 1 || env.Source != "sync" {

@@ -7,7 +7,11 @@
 // an alias when they need both.
 package sync
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/hostryhq/go-common/inbox"
+)
 
 // Limits of protocol v1 (sync/protocol-v1.md, vectors size_limit and emit_batch).
 const (
@@ -21,9 +25,13 @@ const (
 
 // Errors returned by the parser and the registry. Match with errors.Is.
 var (
-	ErrTooLarge     = errors.New("sync: op body or pii over the size limit")
-	ErrHashMismatch = errors.New("sync: h is not the SHA-256 of body")
-	ErrMalformed    = errors.New("sync: malformed op event")
+	ErrTooLarge     error = permanentErr("sync: op body or pii over the size limit")
+	ErrHashMismatch error = permanentErr("sync: h is not the SHA-256 of body")
+	ErrMalformed    error = permanentErr("sync: malformed op event")
+	// ErrNotOp means the event is a gateway event (sync.op.flagged, sync.quarantine.recorded,
+	// sync.pii.erased) or not a sync event at all, not an op. It is not an error of the message:
+	// route it with OpNamespace first.
+	ErrNotOp        = errors.New("sync: not an op event")
 	ErrNotCanonical = errors.New("sync: not canonical JSON (RFC 8785, integers only)")
 	ErrBatchSize    = errors.New("sync: emit batch must hold 1 to 200 ops")
 )
@@ -43,3 +51,9 @@ func CheckBatch(n int) error {
 	}
 	return nil
 }
+
+// permanentErr is a refusal that retrying cannot change: inbox parks the event on its first delivery.
+type permanentErr string
+
+func (e permanentErr) Error() string { return string(e) }
+func (e permanentErr) Unwrap() error { return inbox.ErrPermanent }

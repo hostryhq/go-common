@@ -5,6 +5,9 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/hostryhq/go-common/events"
+	"github.com/hostryhq/go-common/inbox"
 )
 
 const (
@@ -214,5 +217,32 @@ func TestParsePIIShape(t *testing.T) {
 	}
 	if _, err := ParseOp(eventSpec{pii: `{"customer_name":"flat"}`}.build(t)); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("flat pii accepted: %v", err)
+	}
+}
+
+func TestGatewayEventsAreNotOps(t *testing.T) {
+	for typ, want := range map[string]struct {
+		ns string
+		ok bool
+	}{
+		"sync.op.bill": {"bill", true}, "sync.op.flagged": {}, "sync.quarantine.recorded": {},
+		"sync.pii.erased": {}, "sync.op.": {}, "sync.op.a.b": {}, "orders.order.created": {},
+	} {
+		if ns, ok := OpNamespace(typ); ns != want.ns || ok != want.ok {
+			t.Errorf("OpNamespace(%q) = %q,%v", typ, ns, ok)
+		}
+	}
+	for _, typ := range []string{"sync.op.flagged", "sync.quarantine.recorded", "sync.pii.erased"} {
+		env := events.Envelope{Type: typ, V: 1, Source: "sync", TenantID: "t"}
+		if _, err := (&Parser{}).ParseEnvelope(env); !errors.Is(err, ErrNotOp) || errors.Is(err, ErrMalformed) {
+			t.Errorf("%s: want ErrNotOp only, got %v", typ, err)
+		}
+	}
+}
+
+func TestParserRefusalsArePermanentForTheInbox(t *testing.T) {
+	_, err := ParseOp([]byte(`{"type":"sync.op.bill"}`))
+	if !errors.Is(err, ErrMalformed) || !errors.Is(err, inbox.ErrPermanent) {
+		t.Fatalf("a malformed op must be parked on first delivery: %v", err)
 	}
 }

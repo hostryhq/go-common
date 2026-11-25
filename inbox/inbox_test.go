@@ -1,6 +1,8 @@
 package inbox
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -19,5 +21,23 @@ func TestDefaultBackoffDoublesAndCaps(t *testing.T) {
 func TestNewer(t *testing.T) {
 	if !Newer(3, 2) || Newer(2, 2) || Newer(1, 2) {
 		t.Fatal("Newer must be strictly greater")
+	}
+}
+
+func TestShouldParkPermanentAtOnceTransientAtLastAttempt(t *testing.T) {
+	boom := errors.New("boom")
+	for name, c := range map[string]struct {
+		err      error
+		attempt  uint64
+		wantPark bool
+	}{
+		"transient first":   {boom, 1, false},
+		"transient last":    {boom, 10, true},
+		"permanent first":   {Permanent(boom), 1, true},
+		"wrapped permanent": {fmt.Errorf("x: %w", Permanent(boom)), 1, true},
+	} {
+		if got := shouldPark(c.err, c.attempt, 10); got != c.wantPark {
+			t.Errorf("%s: %v", name, got)
+		}
 	}
 }

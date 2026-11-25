@@ -92,7 +92,8 @@ func LoadRegistry(fsys fs.FS) (*Registry, error) {
 			return fmt.Errorf("bus: %s: x-subscribers-by-namespace is only for %s", p, SyncOpType)
 		}
 		for ns, svcs := range doc.ByNamespace {
-			if !nsRe.MatchString(ns) {
+			if !nsRe.MatchString(ns) || ns == "flagged" {
+				// "flagged" is the gateway event sync.op.flagged, not an entity namespace.
 				return fmt.Errorf("bus: %s: bad namespace %q", p, ns)
 			}
 			for _, svc := range svcs {
