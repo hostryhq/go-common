@@ -20,11 +20,12 @@ var sensitive = []string{
 	"password", "passwd", "secret", "token", "authorization", "cookie",
 	"api_key", "apikey", "credential", "otp", "pin", "phone", "mobile",
 	"email", "aadhaar", "pan", "card", "cvv", "name", "address",
+	"proof", "assertion", "gstin", "verifier", "invite", "invitation",
 }
 
 // exactOnly keys are short and would over-match as fragments ("pin" in
 // "shipping", "pan" in "company"); they redact only when equal to the key.
-var exactOnly = map[string]bool{"pin": true, "pan": true, "otp": true, "name": true, "card": true}
+var exactOnly = map[string]bool{"pin": true, "pan": true, "otp": true, "name": true, "card": true, "code": true}
 
 func isSensitive(key string) bool {
 	k := strings.ToLower(key)

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/hostryhq/go-common/ids"
 )
@@ -63,6 +64,33 @@ func TestFailureReleasesKeyAndInProgressIsReported(t *testing.T) {
 	_, _, _ = s.Begin(ctx, tenant, "busy", fp)
 	if _, _, err := s.Begin(ctx, tenant, "busy", fp); !errors.Is(err, ErrInProgress) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestMemoryExpiresRecordsAndTakesOverStaleClaims(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s, tenant, ctx := NewMemory(), ids.New(), context.Background()
+	s.Now = func() time.Time { return now }
+	fp := Fingerprint("POST", "/a", nil)
+
+	if _, started, _ := s.Begin(ctx, tenant, "k", fp); !started {
+		t.Fatal("first claim")
+	}
+	if _, _, err := s.Begin(ctx, tenant, "k", fp); !errors.Is(err, ErrInProgress) {
+		t.Fatalf("err = %v", err)
+	}
+	now = now.Add(DefaultClaimTTL)
+	if _, started, err := s.Begin(ctx, tenant, "k", fp); !started || err != nil {
+		t.Fatalf("takeover started=%v err=%v", started, err)
+	}
+	_ = s.Complete(ctx, tenant, "k", Response{Status: 201})
+	now = now.Add(DefaultTTL - time.Second - DefaultClaimTTL)
+	if r, started, _ := s.Begin(ctx, tenant, "k", fp); started || r == nil {
+		t.Fatal("expected replay before TTL")
+	}
+	now = now.Add(DefaultClaimTTL + 2*time.Second)
+	if _, started, _ := s.Begin(ctx, tenant, "k", fp); !started {
+		t.Fatal("expected new claim after TTL")
 	}
 }
 

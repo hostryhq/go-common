@@ -31,6 +31,19 @@ func TestRedactsSensitiveKeysButNotLookalikes(t *testing.T) {
 	}
 }
 
+func TestRedactsCodeProofAssertionGstinVerifier(t *testing.T) {
+	for _, key := range []string{"code", "proof", "assertion", "gstin", "verifier", "setup_proof", "invite_link"} {
+		var buf bytes.Buffer
+		New(&buf, slog.LevelInfo, "svc").Info("x", key, "SECRETVALUE", "status_code", "OKCODE")
+		if strings.Contains(buf.String(), "SECRETVALUE") {
+			t.Errorf("%s leaked: %s", key, buf.String())
+		}
+		if !strings.Contains(buf.String(), "OKCODE") {
+			t.Errorf("status_code over-redacted: %s", buf.String())
+		}
+	}
+}
+
 func TestAttachesRequestAndTenantIDs(t *testing.T) {
 	var buf bytes.Buffer
 	l := New(&buf, slog.LevelInfo, "svc")

@@ -3,8 +3,12 @@
 // same request returns the stored response; the same key with a different
 // request is rejected. Offline clients retry, so this must be exact.
 //
-// Persistent stores (Postgres) live in each service's repository layer and
-// implement Store. Keys are scoped per tenant.
+// Keys are scoped per tenant. For Postgres use DoTx (pg.go): the claim, the business write and
+// the stored result commit in one transaction, so a crash cannot leave a key stuck, and records
+// expire (24 h default). Never store secrets (tokens, refresh tokens, codes, packs) in a result:
+// use TxResult.OmitBody, which keeps only a SHA-256 fingerprint of the body. Store and Do remain
+// for work that cannot share the transaction; their records also expire and stale claims are
+// taken over.
 package idempotency
 
 import (
@@ -14,6 +18,7 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/hostryhq/go-common/apperr"
 	"github.com/hostryhq/go-common/ids"
@@ -102,18 +107,42 @@ func Do(ctx context.Context, s Store, tenant ids.ID, key, fingerprint string, fn
 }
 
 type entry struct {
-	fp   string
-	resp *Response
+	fp      string
+	resp    *Response
+	created time.Time
 }
 
-// Memory is an in-memory Store for tests and doubles.
+// Memory is an in-memory Store for tests and doubles. Records expire after TTL (DefaultTTL) and
+// unfinished claims older than ClaimTTL (DefaultClaimTTL) are taken over, as in PGStore.
 type Memory struct {
-	mu sync.Mutex
-	m  map[string]*entry
+	mu       sync.Mutex
+	m        map[string]*entry
+	TTL      time.Duration
+	ClaimTTL time.Duration
+	Now      func() time.Time
 }
 
 // NewMemory returns an empty store.
 func NewMemory() *Memory { return &Memory{m: map[string]*entry{}} }
+
+func (s *Memory) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
+}
+
+func (s *Memory) stale(e *entry) bool {
+	ttl, cttl := s.TTL, s.ClaimTTL
+	if ttl <= 0 {
+		ttl = DefaultTTL
+	}
+	if cttl <= 0 {
+		cttl = DefaultClaimTTL
+	}
+	age := s.now().Sub(e.created)
+	return age >= ttl || (e.resp == nil && age >= cttl)
+}
 
 func k(t ids.ID, key string) string { return t.String() + "\x00" + key }
 
@@ -122,8 +151,11 @@ func (s *Memory) Begin(_ context.Context, t ids.ID, key, fp string) (*Response, 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e, ok := s.m[k(t, key)]
+	if ok && s.stale(e) {
+		ok = false
+	}
 	if !ok {
-		s.m[k(t, key)] = &entry{fp: fp}
+		s.m[k(t, key)] = &entry{fp: fp, created: s.now()}
 		return nil, true, nil
 	}
 	if e.fp != fp {

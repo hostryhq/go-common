@@ -19,6 +19,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/hostryhq/go-common/bus"
+	"github.com/hostryhq/go-common/idempotency"
 	"github.com/hostryhq/go-common/inbox"
 	"github.com/hostryhq/go-common/outbox"
 	"github.com/hostryhq/go-common/restore"
@@ -234,7 +235,7 @@ func (e *Env) NewDB(t testing.TB) *sql.DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	for _, s := range []string{outbox.Schema, outbox.RelayStateSchema, inbox.Schema, restore.StateSchema} {
+	for _, s := range []string{outbox.Schema, outbox.RelayStateSchema, inbox.Schema, restore.StateSchema, idempotency.Schema} {
 		if _, err := db.Exec(s); err != nil {
 			t.Fatal(err)
 		}
