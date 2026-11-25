@@ -45,6 +45,7 @@ jobs:
       - name: Integration tests (fail if they were skipped)
         working-directory: go-common
         run: |
+          set -o pipefail
           go test -tags integration -race -count=1 -v ./internal/bustest/... | tee "$RUNNER_TEMP/it.log"
           if grep -q -e '--- SKIP' "$RUNNER_TEMP/it.log"; then echo "integration tests were skipped" >&2; exit 1; fi
 
