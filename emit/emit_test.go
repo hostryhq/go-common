@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hostryhq/go-common/apperr"
+	"github.com/hostryhq/go-common/ids"
 	gsync "github.com/hostryhq/go-common/sync"
 )
 
@@ -22,7 +23,8 @@ func okOp(key string) Op {
 		AuthorisedBy: &perm, Muts: []gsync.Mut{{E: "item", ID: "i1", K: "set", F: map[string]any{"tax_class": "fnb_standard"}}}}
 }
 
-func token(context.Context) (string, error) { return "tok-from-test-source", nil }
+// token mints per tenant, as the gateway requires token tenant = request tenant.
+func token(_ context.Context, t ids.ID) (string, error) { return "tok-for-" + string(t), nil }
 
 func TestEmitSendsTokenAndPerOpKeysAndReadsResults(t *testing.T) {
 	var got struct {
@@ -42,7 +44,7 @@ func TestEmitSendsTokenAndPerOpKeysAndReadsResults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if hdr != "tok-from-test-source" || path != Path || got.TenantID != tenant || len(got.Ops) != 2 || got.Ops[1].Key != "k2" {
+	if hdr != "tok-for-"+tenant || path != Path || got.TenantID != tenant || len(got.Ops) != 2 || got.Ops[1].Key != "k2" {
 		t.Fatalf("request: hdr=%q path=%q got=%+v", hdr, path, got)
 	}
 	if res[0].Seq != 1 || res[0].Replayed || !res[1].Replayed || res[1].Origin != "cloud-1" {
@@ -77,7 +79,7 @@ func TestEmitUnavailableIsSurfacedAs503WithRetryAfter(t *testing.T) {
 		t.Fatalf("unreachable: %v", err)
 	}
 	// A token source failure is also "unavailable", not a rejection.
-	_, err = (&Client{BaseURL: url, Token: func(context.Context) (string, error) { return "", errors.New("identity down") }}).
+	_, err = (&Client{BaseURL: url, Token: func(context.Context, ids.ID) (string, error) { return "", errors.New("identity down") }}).
 		Emit(context.Background(), tenant, []Op{okOp("k1")})
 	if !IsTransient(err) {
 		t.Fatalf("token failure: %v", err)

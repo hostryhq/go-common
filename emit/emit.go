@@ -69,9 +69,11 @@ type Emitter interface {
 	Emit(ctx context.Context, tenant ids.ID, ops []Op) ([]Result, error)
 }
 
-// TokenSource returns the service token for the next call. Tokens are short-lived (no static
+// TokenSource returns the service token for the next call to the gateway for one tenant. Service
+// tokens for emit are minted per tenant (provisional, O2-11): the gateway requires the token's
+// tenant to equal the request tenant. Tokens are short-lived (no static
 // shared secrets between services); never log the value.
-type TokenSource func(ctx context.Context) (string, error)
+type TokenSource func(ctx context.Context, tenant ids.ID) (string, error)
 
 // Client calls the gateway. Zero HTTP uses a client with a 10 second timeout.
 type Client struct {
@@ -209,7 +211,7 @@ func (c *Client) Emit(ctx context.Context, tenant ids.ID, ops []Op) ([]Result, e
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
-	tok, err := c.Token(ctx)
+	tok, err := c.Token(ctx, tenant)
 	if err != nil {
 		return nil, unavailable(fmt.Errorf("service token: %w", err), 0)
 	}
